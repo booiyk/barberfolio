@@ -32,6 +32,8 @@ function dateOf(transactedAt) { return String(transactedAt).slice(0, 10); }
 function num(v) { var n = Number(v); return isFinite(n) ? n : 0; }
 function fmtIDR(n) { return 'Rp' + Math.round(num(n)).toLocaleString('id-ID'); }
 function fmtPct(n) { return (Math.round(num(n) * 10) / 10).toLocaleString('id-ID') + '%'; }
+/* Margin tidak terdefinisi bila omzet bersih <= 0 (bug #16): tampilkan '—', bukan 0%. */
+function fmtMargin(m) { return m == null ? '\u2014' : fmtPct(m); }
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
     return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -82,18 +84,29 @@ function closingFor(db, branchId, dateStr) {
     gross_revenue: gross, discount_total: discount, net_revenue: net,
     commission_total: commission, expense_total: expenses, tip_total: tip,
     cash_expected: cashExpected, profit: profit,
-    margin: net > 0 ? profit / net * 100 : 0
+    margin: net > 0 ? profit / net * 100 : null
   };
+}
+
+/* Cabang nonaktif dikeluarkan dari total gabungan supaya angka kartu,
+   baris "Total gabungan", dan tabel perbandingan selalu konsisten (bug #3).
+   Transaksi/biaya cabang nonaktif tetap tersimpan dan muncul lagi
+   kalau cabang diaktifkan kembali. */
+function branchCounted(db, branchId) {
+  var b = db.branches.find(function (x) { return x.id === branchId; });
+  return !b || b.is_active;
 }
 
 function summarize(db, branchId, startDate, endDate) {
   var txs = db.transactions.filter(function (t) {
     var d = dateOf(t.transacted_at);
-    return isCompleted(t) && (!branchId || branchId === 'all' || t.branch_id === branchId)
+    var branchOk = !branchId || branchId === 'all' ? branchCounted(db, t.branch_id) : t.branch_id === branchId;
+    return isCompleted(t) && branchOk
       && (!startDate || d >= startDate) && (!endDate || d <= endDate);
   });
   var exps = db.expenses.filter(function (e) {
-    return (!branchId || branchId === 'all' || e.branch_id === branchId)
+    var branchOk = !branchId || branchId === 'all' ? branchCounted(db, e.branch_id) : e.branch_id === branchId;
+    return branchOk
       && (!startDate || e.expense_date >= startDate) && (!endDate || e.expense_date <= endDate);
   });
   var gross = txs.reduce(function (s, t) { return s + txGross(t); }, 0);
@@ -106,7 +119,7 @@ function summarize(db, branchId, startDate, endDate) {
   return {
     gross: gross, discount: discount, net: net, commission: commission,
     expenses: expenses, tip: tip, profit: profit,
-    margin: net > 0 ? profit / net * 100 : 0,
+    margin: net > 0 ? profit / net * 100 : null,
     customers: txs.length, avgTicket: txs.length > 0 ? net / txs.length : 0,
     transactions: txs
   };
@@ -165,14 +178,27 @@ function demoData() {
 
 /* ---------- ekspor CSV ---------- */
 function buildTransactionsCSV(db, branchId, startDate, endDate) {
-  var s = summarize(db, branchId, startDate, endDate);
   var rows = [['tanggal', 'cabang', 'kapster', 'layanan', 'qty', 'harga_satuan', 'subtotal', 'komisi_item', 'diskon', 'tip', 'metode_bayar', 'status']];
   var branchName = function (id) { var b = db.branches.find(function (x) { return x.id === id; }); return b ? b.name : id; };
   var barberName = function (id) { var b = db.barbers.find(function (x) { return x.id === id; }); return b ? b.full_name : ''; };
   var serviceName = function (id) { var b = db.services.find(function (x) { return x.id === id; }); return b ? b.name : ''; };
-  s.transactions.forEach(function (t) {
-    (t.items || []).forEach(function (it) {
-      rows.push([dateOf(t.transacted_at), branchName(t.branch_id), barberName(it.barber_id), serviceName(it.service_id), it.qty, it.unit_price, itemSubtotal(it), itemCommission(it), t.discount_amount, t.tip_amount, PAYMENT_LABELS[t.payment_method] || t.payment_method, t.status]);
+  /* Daftar transaksi sendiri (bukan dari summarize) supaya transaksi void
+     ikut terarsip — kolom status menandainya (bug #4). */
+  var txs = db.transactions.filter(function (t) {
+    var d = dateOf(t.transacted_at);
+    var branchOk = !branchId || branchId === 'all' ? branchCounted(db, t.branch_id) : t.branch_id === branchId;
+    return branchOk && (!startDate || d >= startDate) && (!endDate || d <= endDate);
+  });
+  txs.forEach(function (t) {
+    var items = t.items || [];
+    if (items.length === 0) {
+      rows.push([dateOf(t.transacted_at), branchName(t.branch_id), '', '', '', '', '', '', t.discount_amount, t.tip_amount, PAYMENT_LABELS[t.payment_method] || t.payment_method, t.status]);
+      return;
+    }
+    items.forEach(function (it, idx) {
+      /* Diskon & tip level-transaksi hanya di baris item pertama,
+         supaya penjumlahan kolom di spreadsheet tidak double-count. */
+      rows.push([dateOf(t.transacted_at), branchName(t.branch_id), barberName(it.barber_id), serviceName(it.service_id), it.qty, it.unit_price, itemSubtotal(it), itemCommission(it), idx === 0 ? t.discount_amount : '', idx === 0 ? t.tip_amount : '', PAYMENT_LABELS[t.payment_method] || t.payment_method, t.status]);
     });
   });
   return rows.map(function (r) { return r.map(function (c) { return '"' + String(c).replace(/"/g, '""') + '"'; }).join(','); }).join('\n');
@@ -199,7 +225,10 @@ function periodRange(p) {
     db.transactions.forEach(function (t) { dates.push(dateOf(t.transacted_at)); });
     db.expenses.forEach(function (e) { dates.push(e.expense_date); });
     dates.sort();
-    return { start: dates.length ? dates[0] : addDays(today, -29), end: today };
+    /* Akhir periode = tanggal data terbaru kalau ada data masa depan,
+       supaya transaksi bertanggal masa depan tidak "hilang" (bug #7). */
+    var end = dates.length && dates[dates.length - 1] > today ? dates[dates.length - 1] : today;
+    return { start: dates.length ? dates[0] : addDays(today, -29), end: end };
   }
   return { start: filters.start || addDays(today, -29), end: filters.end || today };
 }
@@ -211,9 +240,17 @@ function applyPeriod(p) {
 }
 function setPeriod(p) {
   if (p === 'custom') {
+    var s = $('filterStart').value || filters.start;
+    var e = $('filterEnd').value || filters.end;
+    if (s && e && s > e) {
+      toast('Tanggal awal tidak boleh setelah tanggal akhir.');
+      $('filterStart').value = filters.start;
+      $('filterEnd').value = filters.end;
+      return;
+    }
     filters.period = 'custom';
-    filters.start = $('filterStart').value || filters.start;
-    filters.end = $('filterEnd').value || filters.end;
+    filters.start = s;
+    filters.end = e;
   } else {
     applyPeriod(p);
   }
@@ -335,7 +372,7 @@ function renderDashboard() {
     '<p class="muted">Periode ' + esc(filters.start) + ' s.d. ' + esc(filters.end) + (filters.branch === 'all' ? ' — semua cabang' : ' — ' + esc((branchById(filters.branch) || {}).name || '')) + '.</p>' +
     '<div class="cards">' +
     '<div class="card"><div class="label">Omzet bersih</div><div class="value">' + fmtIDR(s.net) + '</div><div class="sub">Kotor ' + fmtIDR(s.gross) + ' − diskon ' + fmtIDR(s.discount) + '</div></div>' +
-    '<div class="card"><div class="label">Profit operasional</div><div class="value">' + fmtIDR(s.profit) + '</div><div class="sub">Margin ' + fmtPct(s.margin) + '</div></div>' +
+    '<div class="card"><div class="label">Profit operasional</div><div class="value">' + fmtIDR(s.profit) + '</div><div class="sub">Margin ' + fmtMargin(s.margin) + '</div></div>' +
     '<div class="card"><div class="label">Pelanggan</div><div class="value">' + s.customers + '</div><div class="sub">Tiket rata-rata ' + fmtIDR(s.avgTicket) + '</div></div>' +
     '<div class="card"><div class="label">Komisi kapster</div><div class="value">' + fmtIDR(s.commission) + '</div><div class="sub">Biaya ' + fmtIDR(s.expenses) + ' · Tip ' + fmtIDR(s.tip) + ' (di luar omzet)</div></div>' +
     '</div>' +
@@ -346,9 +383,9 @@ function renderDashboard() {
       ? '<div class="notice"><strong>Belum ada cabang.</strong>Buka tab Master, tambah cabang pertama, lalu layanan dan kapsternya.</div>'
       : '<div style="overflow-x:auto"><table><thead><tr><th>Cabang</th><th class="num">Omzet bersih</th><th class="num">Pelanggan</th><th class="num">Tiket rata-rata</th><th class="num">Komisi</th><th class="num">Biaya</th><th class="num">Profit</th><th class="num">Margin</th></tr></thead><tbody>' +
         rows.map(function (r) {
-          return '<tr><td>' + esc(r.branch.name) + ' (' + esc(r.branch.code) + ')</td><td class="num">' + fmtIDR(r.s.net) + '</td><td class="num">' + r.s.customers + '</td><td class="num">' + fmtIDR(r.s.avgTicket) + '</td><td class="num">' + fmtIDR(r.s.commission) + '</td><td class="num">' + fmtIDR(r.s.expenses) + '</td><td class="num">' + fmtIDR(r.s.profit) + '</td><td class="num">' + fmtPct(r.s.margin) + '</td></tr>';
+          return '<tr><td>' + esc(r.branch.name) + ' (' + esc(r.branch.code) + ')</td><td class="num">' + fmtIDR(r.s.net) + '</td><td class="num">' + r.s.customers + '</td><td class="num">' + fmtIDR(r.s.avgTicket) + '</td><td class="num">' + fmtIDR(r.s.commission) + '</td><td class="num">' + fmtIDR(r.s.expenses) + '</td><td class="num">' + fmtIDR(r.s.profit) + '</td><td class="num">' + fmtMargin(r.s.margin) + '</td></tr>';
         }).join('') +
-        '</tbody><tfoot><tr><td>Total gabungan</td><td class="num">' + fmtIDR(s.net) + '</td><td class="num">' + s.customers + '</td><td class="num">' + fmtIDR(s.avgTicket) + '</td><td class="num">' + fmtIDR(s.commission) + '</td><td class="num">' + fmtIDR(s.expenses) + '</td><td class="num">' + fmtIDR(s.profit) + '</td><td class="num">' + fmtPct(s.margin) + '</td></tr></tfoot></table></div>');
+        '</tbody><tfoot><tr><td>Total gabungan</td><td class="num">' + fmtIDR(s.net) + '</td><td class="num">' + s.customers + '</td><td class="num">' + fmtIDR(s.avgTicket) + '</td><td class="num">' + fmtIDR(s.commission) + '</td><td class="num">' + fmtIDR(s.expenses) + '</td><td class="num">' + fmtIDR(s.profit) + '</td><td class="num">' + fmtMargin(s.margin) + '</td></tr></tfoot></table></div>');
 }
 
 /* ---------- Input transaksi ---------- */
@@ -358,8 +395,22 @@ function draftTotals() {
   var commission = txDraft.reduce(function (s, it) { return s + itemCommission(it); }, 0);
   return { gross: gross, commission: commission, net: gross - num(txForm.discount) };
 }
+/* Pratinjau diskon di-update tanpa render ulang seluruh panel: render ulang
+   mengganti elemen input yang sedang diketik sehingga kursor meloncat ke
+   awal dan ketikan berikutnya "hilang" (bug #1). */
+function updateDraftPreview() {
+  var el = $('draftPreview');
+  if (!el) return;
+  txForm.discount = num($('txDiscount').value);
+  var t = draftTotals();
+  el.innerHTML = '<strong>Pratinjau:</strong> omzet kotor ' + fmtIDR(t.gross) + ' − diskon ' + fmtIDR(txForm.discount) + ' = omzet bersih ' + fmtIDR(t.net) + ' · komisi ' + fmtIDR(t.commission);
+}
 function renderInput() {
   var el = $('tab-input');
+  /* Render ulang mengganti seluruh isi panel (termasuk input yang sedang
+     diketik) — ingat input yang fokus supaya mengetik diskon tidak
+     terputus di tengah jalan (bug #1). */
+  var prevFocusId = document.activeElement ? document.activeElement.id : '';
   var branches = activeBranches();
   if (branches.length === 0) {
     el.innerHTML = '<h2>Input transaksi</h2><div class="notice"><strong>Belum ada cabang.</strong>Tambah cabang dulu di tab Master.</div>';
@@ -377,6 +428,7 @@ function renderInput() {
   var services = db.services.filter(function (s) { return s.branch_id === selBranch && s.is_active; });
   var barbers = db.barbers.filter(function (b) { return b.branch_id === selBranch && b.is_active; });
   var t = draftTotals();
+  var maxWhen = todayStr() + 'T23:59';
   var recent = db.transactions
     .filter(function (x) { return x.branch_id === selBranch; })
     .slice().sort(function (a, b) { return String(b.transacted_at).localeCompare(String(a.transacted_at)); })
@@ -386,9 +438,9 @@ function renderInput() {
     '<p class="muted">Satu transaksi = satu kunjungan. Harga dan persen komisi disalin (snapshot) saat disimpan, jadi perubahan harga nanti tidak mengubah laporan lama.</p>' +
     '<div class="form-grid">' +
     '<label>Cabang<select id="txBranch" onchange="onTxBranchChange()">' + branches.map(function (b) { return '<option value="' + b.id + '"' + (b.id === selBranch ? ' selected' : '') + '>' + esc(b.name) + '</option>'; }).join('') + '</select></label>' +
-    '<label>Tanggal &amp; jam<input type="datetime-local" id="txWhen" value="' + esc(txForm.when || (todayStr() + 'T10:00')) + '"></label>' +
+    '<label>Tanggal &amp; jam<input type="datetime-local" id="txWhen" max="' + maxWhen + '" value="' + esc(txForm.when || (todayStr() + 'T10:00')) + '"></label>' +
     '<label>Metode bayar<select id="txMethod">' + PAYMENT_METHODS.map(function (m) { return '<option value="' + m + '"' + (m === txForm.method ? ' selected' : '') + '>' + PAYMENT_LABELS[m] + '</option>'; }).join('') + '</select></label>' +
-    '<label>Diskon (Rp)<input type="number" id="txDiscount" min="0" value="' + txForm.discount + '" oninput="renderInput()"></label>' +
+    '<label>Diskon (Rp)<input type="number" id="txDiscount" min="0" value="' + txForm.discount + '" oninput="updateDraftPreview()"></label>' +
     '<label>Tip (Rp) — bukan omzet<input type="number" id="txTip" min="0" value="' + txForm.tip + '"></label>' +
     '<label>Catatan<input type="text" id="txNotes" placeholder="opsional" value="' + esc(txForm.notes) + '"></label>' +
     '</div>' +
@@ -406,21 +458,30 @@ function renderInput() {
       txDraft.map(function (it, i) {
         return '<tr><td>' + esc((serviceById(it.service_id) || {}).name || '') + '</td><td>' + esc((barberById(it.barber_id) || {}).full_name || '') + '</td><td class="num">' + it.qty + '</td><td class="num">' + fmtIDR(it.unit_price) + '</td><td class="num">' + fmtIDR(itemSubtotal(it)) + '</td><td class="num">' + fmtIDR(itemCommission(it)) + ' (' + it.commission_percent + '%)</td><td><button type="button" onclick="removeDraftItem(' + i + ')">Hapus</button></td></tr>';
       }).join('') + '</tbody></table>') +
-    '<div class="notice"><strong>Pratinjau:</strong> omzet kotor ' + fmtIDR(t.gross) + ' − diskon ' + fmtIDR(txForm.discount) + ' = omzet bersih ' + fmtIDR(t.net) + ' · komisi ' + fmtIDR(t.commission) + '</div>' +
+    '<div class="notice" id="draftPreview"><strong>Pratinjau:</strong> omzet kotor ' + fmtIDR(t.gross) + ' − diskon ' + fmtIDR(txForm.discount) + ' = omzet bersih ' + fmtIDR(t.net) + ' · komisi ' + fmtIDR(t.commission) + '</div>' +
     '<button type="button" class="primary" onclick="saveTransaction()">Simpan transaksi</button>' +
     '<h3>Transaksi terakhir di cabang ini</h3>' +
     (recent.length === 0 ? '<p class="muted">Belum ada transaksi.</p>' :
       '<table><thead><tr><th>Tanggal</th><th>Isi</th><th class="num">Bersih</th><th class="num">Komisi</th><th>Bayar</th><th>Status</th><th></th></tr></thead><tbody>' +
       recent.map(function (x) {
         var items = (x.items || []).map(function (it) { return esc((serviceById(it.service_id) || {}).name || '') + ' x' + it.qty; }).join(', ');
-        return '<tr><td>' + esc(String(x.transacted_at).replace('T', ' ')) + '</td><td>' + items + (x.tip_amount ? '<br><span class="muted">Tip ' + fmtIDR(x.tip_amount) + '</span>' : '') + '</td><td class="num">' + fmtIDR(txNet(x)) + '</td><td class="num">' + fmtIDR(txCommission(x)) + '</td><td>' + (PAYMENT_LABELS[x.payment_method] || x.payment_method) + '</td><td>' + (x.status === 'completed' ? 'Selesai' : 'Void') + '</td><td>' + (x.status === 'completed' ? '<button type="button" onclick="voidTransaction(\'' + x.id + '\')">Void</button>' : '') + '</td></tr>';
+        return '<tr><td>' + esc(String(x.transacted_at).replace('T', ' ')) + '</td><td>' + items + (x.tip_amount ? '<br><span class="muted">Tip ' + fmtIDR(x.tip_amount) + '</span>' : '') + (x.notes ? '<br><span class="muted">Catatan: ' + esc(x.notes) + '</span>' : '') + '</td><td class="num">' + fmtIDR(txNet(x)) + '</td><td class="num">' + fmtIDR(txCommission(x)) + '</td><td>' + (PAYMENT_LABELS[x.payment_method] || x.payment_method) + '</td><td>' + (x.status === 'completed' ? 'Selesai' : 'Void') + '</td><td>' + (x.status === 'completed' ? '<button type="button" onclick="voidTransaction(\'' + x.id + '\')">Void</button>' : '') + '</td></tr>';
       }).join('') + '</tbody></table>');
+  if (prevFocusId) { var f = $(prevFocusId); if (f && f.focus) { try { f.focus(); } catch (e) {} } }
 }
-function onTxBranchChange() { txDraft = []; renderInput(); }
+function onTxBranchChange() {
+  if (txDraft.length > 0 && !confirm('Ganti cabang akan menghapus draf layanan yang belum disimpan. Lanjutkan?')) {
+    /* Kembalikan pilihan ke cabang sebelumnya (tersimpan di txForm). */
+    if (txForm.branch) $('txBranch').value = txForm.branch;
+    return;
+  }
+  txDraft = []; renderInput();
+}
 function addDraftItem() {
   var svc = serviceById($('draftService').value);
   var barber = barberById($('draftBarber').value);
-  var qty = Math.max(1, num($('draftQty').value) || 1);
+  var qty = Number($('draftQty').value);
+  if (!Number.isInteger(qty) || qty < 1) { toast('Jumlah harus bilangan bulat minimal 1.'); return; }
   if (!svc || !barber) return;
   var pct = commissionPercentFor(svc, barber);
   txDraft.push({ id: uid(), service_id: svc.id, barber_id: barber.id, qty: qty, unit_price: num(svc.price), commission_percent: pct, commission_amount: Math.round(qty * num(svc.price) * pct / 100) });
@@ -432,6 +493,12 @@ function saveTransaction() {
   var branchId = $('txBranch').value;
   var when = $('txWhen').value || (todayStr() + 'T10:00');
   var dateStr = when.slice(0, 10);
+  if (dateStr > todayStr()) { toast('Tanggal transaksi tidak boleh di masa depan.'); return; }
+  var gross = txDraft.reduce(function (s, it) { return s + itemSubtotal(it); }, 0);
+  var discount = num($('txDiscount').value);
+  var tip = num($('txTip').value);
+  if (discount < 0 || discount > gross) { toast('Diskon harus antara Rp0 dan omzet kotor (' + fmtIDR(gross) + ').'); return; }
+  if (tip < 0) { toast('Tip tidak boleh negatif.'); return; }
   if (isLocked(db, branchId, dateStr)) { toast('Tanggal ' + dateStr + ' sudah terkunci di Tutup Kas — transaksi tidak bisa ditambah. Buka kunci dulu.'); return; }
   var items = txDraft.map(function (it) {
     return { id: uid(), service_id: it.service_id, barber_id: it.barber_id, qty: it.qty, unit_price: it.unit_price, commission_percent: it.commission_percent, commission_amount: itemCommission(it) };
@@ -439,7 +506,7 @@ function saveTransaction() {
   db.transactions.push({
     id: uid(), branch_id: branchId, customer_id: null,
     served_by_barber_id: items[0].barber_id, transacted_at: when.replace('T', 'T'),
-    discount_amount: num($('txDiscount').value), tip_amount: num($('txTip').value),
+    discount_amount: discount, tip_amount: tip,
     payment_method: $('txMethod').value, payment_ref: '', source: 'manual',
     status: 'completed', created_by: 'owner', notes: $('txNotes').value || '', items: items
   });
@@ -491,6 +558,7 @@ function renderBiaya() {
 function saveExpense() {
   var branchId = $('exBranch').value;
   var dateStr = $('exDate').value || todayStr();
+  if (dateStr > todayStr()) { toast('Tanggal biaya tidak boleh di masa depan.'); return; }
   if (isLocked(db, branchId, dateStr)) { toast('Tanggal ' + dateStr + ' sudah terkunci di Tutup Kas — biaya tidak bisa ditambah. Buka kunci dulu.'); return; }
   var amount = num($('exAmount').value);
   var desc = $('exDesc').value.trim();
@@ -541,7 +609,7 @@ function renderTutupKas() {
     '<tr><td>Omzet bersih</td><td class="num"><strong>' + fmtIDR(c.net_revenue) + '</strong></td></tr>' +
     '<tr><td>Komisi kapster</td><td class="num">− ' + fmtIDR(c.commission_total) + '</td></tr>' +
     '<tr><td>Biaya hari itu</td><td class="num">− ' + fmtIDR(c.expense_total) + '</td></tr>' +
-    '<tr><td>Profit operasional</td><td class="num"><strong>' + fmtIDR(c.profit) + '</strong> (' + fmtPct(c.margin) + ')</td></tr>' +
+    '<tr><td>Profit operasional</td><td class="num"><strong>' + fmtIDR(c.profit) + '</strong> (' + fmtMargin(c.margin) + ')</td></tr>' +
     '<tr><td>Tip (di luar omzet)</td><td class="num">' + fmtIDR(c.tip_total) + '</td></tr>' +
     '<tr><td>Tunai yang seharusnya ada (cash expected)</td><td class="num">' + fmtIDR(c.cash_expected) + '</td></tr>' +
     '</tbody></table>' +
@@ -567,6 +635,9 @@ function onClosingSelChange() {
 }
 function saveClosing(status) {
   var c = closingFor(db, closingSel.branch, closingSel.date);
+  if (status === 'locked' && c.total_transactions === 0 && c.expense_total === 0) {
+    if (!confirm('Hari ini belum ada transaksi/biaya. Tetap kunci rekap?')) return;
+  }
   var cashActual = $('ckCashActual').value === '' ? null : num($('ckCashActual').value);
   var existing = findClosing(db, closingSel.branch, closingSel.date);
   var snap = {
@@ -698,16 +769,20 @@ function addBranch() {
   var code = $('mBranchCode').value.trim().toUpperCase();
   if (!name || !code) { toast('Isi nama dan kode cabang.'); return; }
   if (db.branches.some(function (b) { return b.code.toUpperCase() === code; })) { toast('Kode cabang sudah dipakai.'); return; }
-  db.branches.push({ id: uid(), name: name, code: code, address: '', city: $('mBranchCity').value.trim(), phone: $('mBranchPhone').value.trim(), timezone: 'Asia/Jakarta', opened_at: todayStr(), rent_monthly: num($('mBranchRent').value), is_active: true });
+  var rent = num($('mBranchRent').value);
+  if (rent < 0) { toast('Sewa bulanan tidak boleh negatif.'); return; }
+  db.branches.push({ id: uid(), name: name, code: code, address: '', city: $('mBranchCity').value.trim(), phone: $('mBranchPhone').value.trim(), timezone: 'Asia/Jakarta', opened_at: todayStr(), rent_monthly: rent, is_active: true });
   persist(); toast('Cabang ditambah.'); renderMaster();
 }
 function toggleBranch(id) { var b = branchById(id); if (b) { b.is_active = !b.is_active; persist(); renderMaster(); } }
 function addService() {
   var branchId = $('mSvcBranch').value;
   var name = $('mSvcName').value.trim();
-  var price = num($('mSvcPrice').value);
-  if (!branchId || !name || price < 0) { toast('Pilih cabang, isi nama layanan dan harga.'); return; }
+  var priceRaw = $('mSvcPrice').value.trim();
+  var price = num(priceRaw);
+  if (!branchId || !name || priceRaw === '' || !isFinite(Number(priceRaw)) || price <= 0) { toast('Pilih cabang, isi nama layanan dan harga lebih dari Rp0.'); return; }
   var pct = $('mSvcPct').value === '' ? null : num($('mSvcPct').value);
+  if (pct != null && (pct < 0 || pct > 100)) { toast('Komisi layanan harus antara 0% dan 100%.'); return; }
   db.services.push({ id: uid(), branch_id: branchId, name: name, category: $('mSvcCat').value, price: price, duration_minutes: null, commission_percent: pct, is_active: true });
   persist(); toast('Layanan ditambah.'); renderMaster();
 }
@@ -716,7 +791,9 @@ function addBarber() {
   var branchId = $('mBarBranch').value;
   var name = $('mBarName').value.trim();
   if (!branchId || !name) { toast('Pilih cabang dan isi nama kapster.'); return; }
-  db.barbers.push({ id: uid(), branch_id: branchId, full_name: name, phone: $('mBarPhone').value.trim(), commission_scheme: 'percent', commission_percent: num($('mBarPct').value), base_salary_monthly: num($('mBarSalary').value), is_active: true });
+  var pct = num($('mBarPct').value);
+  if (pct < 0 || pct > 100) { toast('Komisi kapster harus antara 0% dan 100%.'); return; }
+  db.barbers.push({ id: uid(), branch_id: branchId, full_name: name, phone: $('mBarPhone').value.trim(), commission_scheme: 'percent', commission_percent: pct, base_salary_monthly: num($('mBarSalary').value), is_active: true });
   persist(); toast('Kapster ditambah.'); renderMaster();
 }
 function toggleBarber(id) { var b = barberById(id); if (b) { b.is_active = !b.is_active; persist(); renderMaster(); } }
@@ -761,7 +838,7 @@ function renderPanduan() {
     '<p class="muted">Data tersimpan lokal di browser ini (localStorage). Hapus data browser atau tombol di atas akan menghilangkan semua catatan — ekspor CSV dulu kalau perlu arsip.</p></div>';
 }
 function loadDemoData() {
-  if (db.transactions.length > 0 || db.branches.length > 0) {
+  if (db.transactions.length > 0 || db.branches.length > 0 || db.expenses.length > 0 || db.closings.length > 0) {
     if (!confirm('Data yang ada sekarang akan diganti dengan data contoh Bab 11. Lanjutkan?')) return;
   }
   db = demoData();
@@ -811,8 +888,14 @@ $('filterBranch').addEventListener('change', function () { filters.branch = this
 document.querySelectorAll('.pill').forEach(function (btn) {
   btn.addEventListener('click', function () { setPeriod(btn.dataset.period); });
 });
-$('filterStart').addEventListener('change', function () { filters.start = this.value; filters.period = 'custom'; render(); });
-$('filterEnd').addEventListener('change', function () { filters.end = this.value; filters.period = 'custom'; render(); });
+$('filterStart').addEventListener('change', function () {
+  if (this.value && filters.end && this.value > filters.end) { toast('Tanggal awal tidak boleh setelah tanggal akhir.'); this.value = filters.start; return; }
+  filters.start = this.value; filters.period = 'custom'; render();
+});
+$('filterEnd').addEventListener('change', function () {
+  if (this.value && filters.start && this.value < filters.start) { toast('Tanggal akhir tidak boleh sebelum tanggal awal.'); this.value = filters.end; return; }
+  filters.end = this.value; filters.period = 'custom'; render();
+});
 $('exportCsvBtn').addEventListener('click', exportCSV);
 $('themeToggle').addEventListener('click', function () {
   var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
@@ -824,6 +907,8 @@ $('themeToggle').addEventListener('click', function () {
    blok if di atas berjalan dalam mode strict (deklarasi fungsi di dalam
    blok tidak menjadi global dengan sendirinya). */
 window.switchTab = switchTab;
+window.renderInput = renderInput;
+window.updateDraftPreview = updateDraftPreview;
 window.setPeriod = setPeriod;
 window.loadDemoData = loadDemoData;
 window.wipeData = wipeData;
