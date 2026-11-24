@@ -40,7 +40,7 @@ python3 -m http.server 8000
 # lalu buka http://localhost:8000
 ```
 
-Tema hitam-putih murni, dengan mode gelap (latar hitam, teks putih).
+Tema hitam-putih murni; gelap jadi default (latar hampir hitam, kartu rounded, filter periode pill), tombol di header mengganti ke mode terang.
 Bisa dibuka dari HP maupun desktop.
 
 ## Cara pakai singkat
