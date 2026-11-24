@@ -263,8 +263,26 @@ function switchTab(name) {
     btn.classList.toggle('active', btn.dataset.tab === name);
   });
   document.querySelectorAll('.panel').forEach(function (p) { p.hidden = p.id !== 'tab-' + name; });
-  $('globalFilters').style.display = (name === 'panduan') ? 'none' : 'flex';
+  /* Bilah filter periode/cabang hanya dipakai Dashboard & Laporan.
+     Di Input, Biaya, Tutup Kas, dan Master ia tidak berpengaruh — disembunyikan
+     supaya tidak membingungkan (dulu tampil di semua tab kecuali Panduan). */
+  $('globalFilters').style.display = (name === 'dashboard' || name === 'laporan') ? 'flex' : 'none';
   render();
+}
+
+/* Bungkus setiap tabel panel dalam wadah geser-horizontal supaya tabel
+   tidak terpotong di layar kecil (dulu tabel Master/Input/Biaya/Laporan
+   meluber keluar viewport di HP dan tombolnya tidak terjangkau). */
+function wrapTables() {
+  document.querySelectorAll('.panel table').forEach(function (t) {
+    var parent = t.parentElement;
+    if (parent && parent.classList.contains('table-scroll')) return;
+    if (parent && parent.style && parent.style.overflowX === 'auto') return;
+    var wrap = document.createElement('div');
+    wrap.className = 'table-scroll';
+    parent.insertBefore(wrap, t);
+    wrap.appendChild(t);
+  });
 }
 
 function render() {
@@ -276,6 +294,7 @@ function render() {
   else if (currentTab === 'laporan') renderLaporan();
   else if (currentTab === 'master') renderMaster();
   else if (currentTab === 'panduan') renderPanduan();
+  wrapTables();
 }
 
 /* ---------- Dashboard ---------- */
@@ -295,14 +314,21 @@ function renderDashboard() {
   for (var d = filters.start; d <= filters.end; d = addDays(d, 1)) days.push(d);
   var maxVal = Math.max.apply(null, days.map(function (d) { return trend[d] || 0; }).concat([1]));
   var hasTx = s.transactions.length > 0;
+  /* Kalau belum ada transaksi, jangan tampilkan dua kotak kosong sekaligus
+     ("Belum ada data tren" + "Belum ada transaksi di periode ini") — cukup
+     satu empty state di bawah dengan tombol ke tab Input. */
   var chart = !hasTx
-    ? '<div class="empty"><strong>Belum ada data tren</strong><p>Grafik omzet dan profit harian muncul setelah ada transaksi pada periode ini.</p></div>'
+    ? ''
     : days.length > 60
     ? '<p class="muted">Rentang lebih dari 60 hari — perkecil rentang tanggal untuk melihat grafik harian.</p>'
-    : '<div class="chart">' + days.map(function (d) {
+    : '<div class="chart">' + days.map(function (d, i) {
         var v = trend[d] || 0;
         var h = v > 0 ? Math.max(4, Math.round(v / maxVal * 120)) : 0;
-        return '<div class="bar-wrap" title="' + d + ': ' + fmtIDR(v) + '"><div class="bar" style="height:' + h + 'px"></div><div class="bar-label">' + d.slice(5) + '</div></div>';
+        /* Label tanggal hanya tiap ke-N supaya tidak saling tumpuk di HP
+           (dulu 24 label berjejal di lebar 390px dan tidak terbaca). */
+        var step = days.length > 14 ? Math.ceil(days.length / 8) : 1;
+        var label = (i % step === 0 || i === days.length - 1) ? d.slice(5) : '';
+        return '<div class="bar-wrap" title="' + d + ': ' + fmtIDR(v) + '"><div class="bar" style="height:' + h + 'px"></div><div class="bar-label">' + label + '</div></div>';
       }).join('') + '</div>';
   el.innerHTML =
     '<h2>Dashboard owner</h2>' +
@@ -742,7 +768,7 @@ function loadDemoData() {
   persist();
   filters.branch = 'all';
   applyPeriod('month');
-  toast('Data contoh dimuat. Cek Dashboard: omzet bersih harus Rp330.000, profit Rp92.000.');
+  toast('Data contoh dimuat.');
   switchTab('dashboard');
 }
 function wipeData() {
