@@ -187,7 +187,38 @@ if (typeof module !== 'undefined' && module.exports) {
 if (typeof document !== 'undefined') {
 var db = loadData();
 var currentTab = 'dashboard';
-var filters = { branch: 'all', start: addDays(todayStr(), -29), end: todayStr() };
+var filters = { branch: 'all', period: 'month', start: '', end: '' };
+/* Periode ala versi Muse: pill Hari ini / Bulan ini / 30 hari / Semua / Rentang. */
+function periodRange(p) {
+  var today = todayStr();
+  if (p === 'today') return { start: today, end: today };
+  if (p === 'month') return { start: today.slice(0, 8) + '01', end: today };
+  if (p === '30') return { start: addDays(today, -29), end: today };
+  if (p === 'all') {
+    var dates = [];
+    db.transactions.forEach(function (t) { dates.push(dateOf(t.transacted_at)); });
+    db.expenses.forEach(function (e) { dates.push(e.expense_date); });
+    dates.sort();
+    return { start: dates.length ? dates[0] : addDays(today, -29), end: today };
+  }
+  return { start: filters.start || addDays(today, -29), end: filters.end || today };
+}
+function applyPeriod(p) {
+  filters.period = p;
+  var r = periodRange(p);
+  filters.start = r.start;
+  filters.end = r.end;
+}
+function setPeriod(p) {
+  if (p === 'custom') {
+    filters.period = 'custom';
+    filters.start = $('filterStart').value || filters.start;
+    filters.end = $('filterEnd').value || filters.end;
+  } else {
+    applyPeriod(p);
+  }
+  render();
+}
 var txDraft = []; /* item draf di form Input: {service_id, barber_id, qty, unit_price, commission_percent} */
 var closingSel = { branch: '', date: todayStr() };
 
@@ -220,6 +251,10 @@ function refreshFilterOptions() {
   filters.branch = sel.value;
   $('filterStart').value = filters.start;
   $('filterEnd').value = filters.end;
+  document.querySelectorAll('.pill').forEach(function (btn) {
+    btn.classList.toggle('active', btn.dataset.period === filters.period);
+  });
+  $('rangeInputs').hidden = filters.period !== 'custom';
 }
 
 function switchTab(name) {
@@ -259,7 +294,10 @@ function renderDashboard() {
   var days = [];
   for (var d = filters.start; d <= filters.end; d = addDays(d, 1)) days.push(d);
   var maxVal = Math.max.apply(null, days.map(function (d) { return trend[d] || 0; }).concat([1]));
-  var chart = days.length > 60
+  var hasTx = s.transactions.length > 0;
+  var chart = !hasTx
+    ? '<div class="empty"><strong>Belum ada data tren</strong><p>Grafik omzet dan profit harian muncul setelah ada transaksi pada periode ini.</p></div>'
+    : days.length > 60
     ? '<p class="muted">Rentang lebih dari 60 hari — perkecil rentang tanggal untuk melihat grafik harian.</p>'
     : '<div class="chart">' + days.map(function (d) {
         var v = trend[d] || 0;
@@ -276,6 +314,7 @@ function renderDashboard() {
     '<div class="card"><div class="label">Komisi kapster</div><div class="value">' + fmtIDR(s.commission) + '</div><div class="sub">Biaya ' + fmtIDR(s.expenses) + ' · Tip ' + fmtIDR(s.tip) + ' (di luar omzet)</div></div>' +
     '</div>' +
     '<h3>Tren harian — omzet bersih</h3>' + chart +
+    (!hasTx ? '<div class="empty"><strong>Belum ada transaksi di periode ini</strong><p>Catat transaksi pertama dari tab Input, atau geser periode ke rentang yang sudah ada datanya.</p><button type="button" class="linklike" onclick="switchTab(\'input\')">Ke tab Input transaksi</button></div>' : '') +
     '<h3>Perbandingan antar cabang</h3>' +
     (rows.length === 0
       ? '<div class="notice"><strong>Belum ada cabang.</strong>Buka tab Master, tambah cabang pertama, lalu layanan dan kapsternya.</div>'
@@ -702,8 +741,7 @@ function loadDemoData() {
   db = demoData();
   persist();
   filters.branch = 'all';
-  filters.start = addDays(todayStr(), -29);
-  filters.end = todayStr();
+  applyPeriod('month');
   toast('Data contoh dimuat. Cek Dashboard: omzet bersih harus Rp330.000, profit Rp92.000.');
   switchTab('dashboard');
 }
@@ -732,7 +770,8 @@ function exportCSV() {
 function initTheme() {
   var saved = null;
   try { saved = localStorage.getItem('barberfolio-theme'); } catch (e) {}
-  if (saved) document.documentElement.setAttribute('data-theme', saved);
+  /* Default gelap seperti versi Muse; pilihan tersimpan mengalahkan default. */
+  document.documentElement.setAttribute('data-theme', saved || 'dark');
   updateThemeBtn();
 }
 function updateThemeBtn() {
@@ -743,8 +782,11 @@ document.querySelectorAll('.tab').forEach(function (btn) {
   btn.addEventListener('click', function () { switchTab(btn.dataset.tab); });
 });
 $('filterBranch').addEventListener('change', function () { filters.branch = this.value; render(); });
-$('filterStart').addEventListener('change', function () { filters.start = this.value; render(); });
-$('filterEnd').addEventListener('change', function () { filters.end = this.value; render(); });
+document.querySelectorAll('.pill').forEach(function (btn) {
+  btn.addEventListener('click', function () { setPeriod(btn.dataset.period); });
+});
+$('filterStart').addEventListener('change', function () { filters.start = this.value; filters.period = 'custom'; render(); });
+$('filterEnd').addEventListener('change', function () { filters.end = this.value; filters.period = 'custom'; render(); });
 $('exportCsvBtn').addEventListener('click', exportCSV);
 $('themeToggle').addEventListener('click', function () {
   var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
@@ -752,6 +794,31 @@ $('themeToggle').addEventListener('click', function () {
   try { localStorage.setItem('barberfolio-theme', next); } catch (e) {}
   updateThemeBtn();
 });
+/* Fungsi UI dipakai handler onclick di HTML — ekspos ke window karena
+   blok if di atas berjalan dalam mode strict (deklarasi fungsi di dalam
+   blok tidak menjadi global dengan sendirinya). */
+window.switchTab = switchTab;
+window.setPeriod = setPeriod;
+window.loadDemoData = loadDemoData;
+window.wipeData = wipeData;
+window.addDraftItem = addDraftItem;
+window.removeDraftItem = removeDraftItem;
+window.onTxBranchChange = onTxBranchChange;
+window.saveTransaction = saveTransaction;
+window.voidTransaction = voidTransaction;
+window.saveExpense = saveExpense;
+window.deleteExpense = deleteExpense;
+window.onClosingSelChange = onClosingSelChange;
+window.saveClosing = saveClosing;
+window.unlockClosing = unlockClosing;
+window.addBranch = addBranch;
+window.toggleBranch = toggleBranch;
+window.addService = addService;
+window.toggleService = toggleService;
+window.addBarber = addBarber;
+window.toggleBarber = toggleBarber;
+
+applyPeriod(filters.period);
 initTheme();
 switchTab('dashboard');
 }
