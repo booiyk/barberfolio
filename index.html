@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Barberfolio — Pencatatan Barbershop per Cabang</title>
+<meta name="description" content="Barberfolio: pencatatan operasional dan keuangan barbershop per cabang, khusus owner.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>Barberfolio</h1>
+    <p class="subtitle">Pencatatan barbershop per cabang — pola Propfolio, objeknya cabang.</p>
+  </div>
+  <button id="themeToggle" type="button" aria-label="Ganti mode gelap/terang">Mode gelap</button>
+</header>
+
+<div class="owner-banner" role="note">
+  <strong>Khusus owner.</strong> Aplikasi ini hanya untuk pemilik usaha.
+  Tidak ada login, tidak ada akun staf. Semua cabang, omzet, komisi, dan profit hanya dilihat owner.
+</div>
+
+<nav class="tabs" aria-label="Menu utama">
+  <button type="button" data-tab="dashboard" class="tab active">Dashboard</button>
+  <button type="button" data-tab="input" class="tab">Input</button>
+  <button type="button" data-tab="biaya" class="tab">Biaya</button>
+  <button type="button" data-tab="tutupkas" class="tab">Tutup Kas</button>
+  <button type="button" data-tab="laporan" class="tab">Laporan</button>
+  <button type="button" data-tab="master" class="tab">Master</button>
+  <button type="button" data-tab="panduan" class="tab">Panduan</button>
+</nav>
+
+<section class="filters" id="globalFilters" aria-label="Filter periode dan cabang">
+  <label>Cabang
+    <select id="filterBranch"></select>
+  </label>
+  <label>Dari tanggal
+    <input type="date" id="filterStart">
+  </label>
+  <label>Sampai tanggal
+    <input type="date" id="filterEnd">
+  </label>
+  <button type="button" id="exportCsvBtn">Ekspor CSV transaksi</button>
+</section>
+
+<main>
+  <section id="tab-dashboard" class="panel"></section>
+  <section id="tab-input" class="panel" hidden></section>
+  <section id="tab-biaya" class="panel" hidden></section>
+  <section id="tab-tutupkas" class="panel" hidden></section>
+  <section id="tab-laporan" class="panel" hidden></section>
+  <section id="tab-master" class="panel" hidden></section>
+  <section id="tab-panduan" class="panel" hidden></section>
+</main>
+
+<footer>
+  <p>Barberfolio — data tersimpan lokal di browser ini (localStorage, kunci <code>barberfolio-v1</code>).
+  Buka file <code>index.html</code> apa adanya, tanpa build dan tanpa internet. Versi produksi memakai Supabase — lihat <code>supabase/schema.sql</code>.</p>
+</footer>
+
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>
