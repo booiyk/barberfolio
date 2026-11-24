@@ -13,12 +13,12 @@
     <h1>Barberfolio</h1>
     <p class="subtitle">Pencatatan barbershop per cabang — pola Propfolio, objeknya cabang.</p>
   </div>
-  <button id="themeToggle" type="button" aria-label="Ganti mode gelap/terang">Mode gelap</button>
+  <button id="themeToggle" type="button" aria-label="Ganti mode gelap/terang">Mode terang</button>
 </header>
 
 <div class="owner-banner" role="note">
-  <strong>Khusus owner.</strong> Aplikasi ini hanya untuk pemilik usaha.
-  Tidak ada login, tidak ada akun staf. Semua cabang, omzet, komisi, dan profit hanya dilihat owner.
+  <span class="owner-badge">Khusus owner</span>
+  <span>Pencatatan keuangan semua cabang — hanya untuk kamu sebagai pemilik usaha.</span>
 </div>
 
 <nav class="tabs" aria-label="Menu utama">
@@ -32,16 +32,25 @@
 </nav>
 
 <section class="filters" id="globalFilters" aria-label="Filter periode dan cabang">
-  <label>Cabang
-    <select id="filterBranch"></select>
-  </label>
-  <label>Dari tanggal
-    <input type="date" id="filterStart">
-  </label>
-  <label>Sampai tanggal
-    <input type="date" id="filterEnd">
-  </label>
-  <button type="button" id="exportCsvBtn">Ekspor CSV transaksi</button>
+  <div class="period-pills" role="group" aria-label="Periode">
+    <button type="button" class="pill" data-period="today">Hari ini</button>
+    <button type="button" class="pill active" data-period="month">Bulan ini</button>
+    <button type="button" class="pill" data-period="30">30 hari</button>
+    <button type="button" class="pill" data-period="all">Semua</button>
+    <button type="button" class="pill" data-period="custom">Rentang</button>
+  </div>
+  <div class="range-inputs" id="rangeInputs" hidden>
+    <label>Dari tanggal
+      <input type="date" id="filterStart">
+    </label>
+    <label>Sampai tanggal
+      <input type="date" id="filterEnd">
+    </label>
+  </div>
+  <div class="filters-right">
+    <select id="filterBranch" aria-label="Cabang"></select>
+    <button type="button" id="exportCsvBtn">Ekspor CSV</button>
+  </div>
 </section>
 
 <main>
